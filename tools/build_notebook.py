@@ -291,7 +291,11 @@ env = dict(os.environ)
 env["LD_LIBRARY_PATH"] = f"{server_bin.parent}:{env.get('LD_LIBRARY_PATH', '')}"
 r = subprocess.run([str(server_bin), "--version"], capture_output=True, text=True,
                    env=env, timeout=30)
-print(f"✅ llama-server: {(r.stdout or r.stderr).strip().splitlines()[0]}")
+if r.returncode != 0:
+    out = (r.stdout or "")[-800:] + (r.stderr or "")[-800:]
+    raise RuntimeError(f"❌ llama-server --version завершился с кодом {r.returncode}: {out}")
+ver_line = ((r.stdout or r.stderr or "(пусто)").strip().splitlines() or ["(пусто)"])[0]
+print(f"✅ llama-server: {ver_line}")
 
 ldd = subprocess.run(["ldd", str(server_bin)], capture_output=True, text=True,
                      env=env).stdout
