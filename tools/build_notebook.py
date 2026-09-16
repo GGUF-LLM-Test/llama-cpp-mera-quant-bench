@@ -26,7 +26,7 @@ Google Drive возобновляет автоматом.
 6 функции · 7 цикл · 8 агрегация · 9 финал · 10 пересборка из логов.
 """
 
-EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2", "БЛОК 3", "БЛОК 4", "БЛОК 5"]
+EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2", "БЛОК 3", "БЛОК 4", "БЛОК 5", "БЛОК 6"]
 
 
 BLOCK_00 = """\
@@ -309,6 +309,298 @@ LLAMA_BUILD_INFO = {"sha256_tar": actual_sha, "commit": manifest["коммит"]
 print(f"✅ Блок 5 завершён: {LLAMA_SERVER_BIN}")
 """
 
+BLOCK_06 = '''\
+# @title БЛОК 6: ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+import requests
+from huggingface_hub import HfApi, hf_hub_url, get_hf_file_metadata, hf_hub_download, snapshot_download
+
+# ---------- 6.1 Каталог квантов и эталон (логика v5) ----------
+def get_available_quants(repo_id):
+    print(f"🔍 Кванты в {repo_id}...")
+    quants = []
+    for f in HfApi().list_repo_files(repo_id, repo_type="model"):
+        if f.endswith(".gguf") and "mmproj" not in f.lower():
+            meta = get_hf_file_metadata(hf_hub_url(repo_id, f, repo_type="model"))
+            quants.append({"filename": f, "size_gb": meta.size / (1024 ** 3)})
+    quants.sort(key=lambda x: x["size_gb"])
+    print(f"✅ Найдено квантов: {len(quants)}")
+    return quants
+
+def select_reference_model(quants, max_vram_gb):
+    for tag in ("BF16", "Q8_0"):
+        cand = [q for q in quants if tag in q["filename"].upper()]
+        if cand and cand[0]["size_gb"] + 4.0 <= max_vram_gb:
+            return cand[0]
+    fitting = [q for q in quants if q["size_gb"] + 4.0 <= max_vram_gb]
+    return max(fitting, key=lambda x: x["size_gb"]) if fitting else None
+
+def short_name(filename):
+    return filename.replace(f"{BASE_MODEL_NAME}-", "").replace(".gguf", "")
+
+# ---------- 6.2 Чекпоинт (атомарный, с config_meta) ----------
+CONFIG_KEYS = ["repo_id", "preset", "limit", "seed", "tasks"]
+VERSION_KEYS = ["transformers_version", "lm_eval_version", "llama_cpp_sha256"]
+
+def build_config_meta():
+    return {"repo_id": REPO_ID, "preset": PRESET, "limit": LIMIT, "seed": SEED,
+            "tasks": sorted(TASKS),
+            "transformers_version": TRANSFORMERS_VERSION,
+            "lm_eval_version": LM_EVAL_VERSION,
+            "llama_cpp_sha256": LLAMA_BUILD_INFO["sha256_tar"][:16]}
+
+def fresh_state():
+    return {"config_meta": build_config_meta(), "done": {}, "reference": None}
+
+def load_checkpoint():
+    if FORCE_RERUN:
+        print("⚠️ FORCE_RERUN=True: чекпоинт игнорируется, всё пересчитывается.")
+        return fresh_state()
+    p = Path(CHECKPOINT_PATH)
+    if p.exists():
+        try:
+            state = json.loads(p.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"⚠️ Чекпоинт повреждён ({e}) — начинаем с чистого листа.")
+            return fresh_state()
+        meta = build_config_meta()
+        old = state.get("config_meta", {})
+        diff = [k for k in CONFIG_KEYS if old.get(k) != meta[k]]
+        if diff:
+            raise RuntimeError(
+                f"❌ Чекпоинт {p} собран с другим конфигом (отличается: {diff}).\\n"
+                f"   Установите FORCE_RERUN=True или удалите {SAVE_DIR}.")
+        for k in VERSION_KEYS:
+            if old.get(k) != meta[k]:
+                print(f"⚠️ Дрейф {k}: чекпоинт={old.get(k)} → сейчас={meta[k]} (прогон продолжается, помечено в отчёте).")
+        print(f"💾 Чекпоинт: готово квантов — {len(state['done'])}.")
+        return state
+    return fresh_state()
+
+def save_checkpoint(state):
+    tmp = CHECKPOINT_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, CHECKPOINT_PATH)
+
+# ---------- 6.3 Токенизатор (кэш на Drive + патч config.json; порт V6.1) ----------
+def get_tokenizer_path(repo_id):
+    base_repo = repo_id.replace("-GGUF", "")
+    safe = base_repo.replace("/", "_")
+    local_dir = LOCAL_MODEL_DIR / f"tokenizer_{safe}"
+    drive_dir = SAVE_DIR / "tokenizers" / f"tokenizer_{safe}"
+    if drive_dir.exists() and any(drive_dir.iterdir()):
+        if not local_dir.exists():
+            shutil.copytree(drive_dir, local_dir, dirs_exist_ok=True)
+        return str(local_dir)
+    if not (local_dir.exists() and any(local_dir.iterdir())):
+        print(f"  ⬇️ Токенизатор {base_repo}...")
+        snapshot_download(repo_id=base_repo, local_dir=str(local_dir),
+                          allow_patterns=["tokenizer*", "special_tokens_map.json",
+                                          "tokenizer_config.json", "vocab.json",
+                                          "merges.txt", "*.model", "config.json"],
+                          token=os.environ.get("HF_TOKEN"))
+    cfg = local_dir / "config.json"
+    if cfg.exists():
+        try:
+            config = json.loads(cfg.read_text(encoding="utf-8"))
+            changed = False
+            for key in ("routed_scaling_factor", "rope_theta", "sliding_window"):
+                if key in config and isinstance(config[key], int):
+                    config[key] = float(config[key])
+                    changed = True
+            if changed:
+                cfg.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        except Exception as e:
+            print(f"  ⚠️ Патч config.json не удался: {e}")
+    drive_dir.mkdir(parents=True, exist_ok=True)
+    for item in local_dir.iterdir():
+        if item.is_file():
+            shutil.copy2(item, drive_dir / item.name)
+    return str(local_dir)
+'''
+
+BLOCK_06 += '''\
+
+# ---------- 6.4 Сервер llama.cpp (порт V6.1: изоляция группы процессов) ----------
+def kill_existing_server(port):
+    r = subprocess.run(f"lsof -t -i:{port}", shell=True, capture_output=True, text=True)
+    for pid in (r.stdout.strip().split("\\n") if r.stdout.strip() else []):
+        if pid:
+            subprocess.run(f"kill -9 {pid}", shell=True, capture_output=True)
+            time.sleep(1)
+    subprocess.run("pkill -9 -f llama-server", shell=True, capture_output=True)
+
+def start_llama_server(model_path, port, alias):
+    stdout_f = open(LOG_DIR / "server_stdout.log", "w", encoding="utf-8")
+    stderr_f = open(LOG_DIR / "server_stderr.log", "w", encoding="utf-8")
+    cmd = [LLAMA_SERVER_BIN, "-m", str(model_path),
+           "--host", "127.0.0.1", "--port", str(port),
+           "-ngl", "-1", "-c", "8192", "-b", "2048", "-t", "8",
+           "--seed", str(SEED), "--alias", alias]
+    env = dict(os.environ)
+    env["LD_LIBRARY_PATH"] = f"{Path(LLAMA_SERVER_BIN).parent}:{env.get('LD_LIBRARY_PATH', '')}"
+    proc = subprocess.Popen(cmd, stdout=stdout_f, stderr=stderr_f, env=env,
+                            start_new_session=True)  # изоляция от SIGINT Colab
+    for _ in range(60):
+        if proc.poll() is not None:
+            stop_llama_server(proc, stdout_f, stderr_f)
+            err = (LOG_DIR / "server_stderr.log").read_text(encoding="utf-8")[-2000:]
+            raise RuntimeError(f"❌ Сервер упал при старте (code {proc.returncode}).\\n{err}")
+        try:
+            if requests.get(f"http://127.0.0.1:{port}/health", timeout=2).status_code == 200:
+                return proc, stdout_f, stderr_f
+        except Exception:
+            pass
+        time.sleep(2)
+    stop_llama_server(proc, stdout_f, stderr_f)
+    raise RuntimeError("❌ Сервер не ответил за 120 сек (таймаут /health).")
+
+def stop_llama_server(proc, stdout_f, stderr_f):
+    if proc:
+        try:
+            os.killpg(os.getpgid(proc.pid), 15)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                os.killpg(os.getpgid(proc.pid), 9)
+            except Exception:
+                proc.kill()
+    for f in (stdout_f, stderr_f):
+        if f:
+            try:
+                f.close()
+            except Exception:
+                pass
+
+def smoke_test_echo_logprobs(port):
+    """Критический гейт: echo+logprobs в /v1/completions (PR #27537)."""
+    try:
+        r = requests.post(
+            f"http://127.0.0.1:{port}/v1/completions",
+            json={"prompt": "Столица России — Москва. Столица Франции — ",
+                  "max_tokens": 1, "echo": True, "logprobs": 5},
+            timeout=180)
+        r.raise_for_status()
+        lp = (r.json()["choices"][0].get("logprobs") or {}).get("token_logprobs")
+        n = len(lp) if lp else 0
+        if n < 5:
+            return False, f"получено {n} logprob-ов (нужно ≥ 5) — патч echo/logprobs не работает"
+        return True, f"OK: {n} logprob-ов на echo-запросе"
+    except Exception as e:
+        return False, f"запрос не прошёл: {e!r}"
+
+# ---------- 6.5 Запуск одной задачи (lm_eval CLI, локальный скоринг) ----------
+def run_task(quant_name, task, base_repo, tokenizer_path):
+    out_dir = LOCAL_RESULTS_DIR / quant_name / task
+    out_dir.mkdir(parents=True, exist_ok=True)
+    model_args = (f"model={base_repo},"
+                  f"base_url=http://127.0.0.1:{SERVER_PORT}/v1/completions,"
+                  f"num_concurrent=8,"
+                  f"tokenizer_backend=huggingface,"
+                  f"tokenizer={tokenizer_path},"
+                  f"tokenized_requests=False,"
+                  f"timeout=1000000")
+    cmd = ["lm_eval", "--model", "local-completions", "--model_args", model_args,
+           "--tasks", task, "--include_path", str(MERA_TASKS_PATH),
+           "--output_path", str(out_dir), "--log_samples",
+           "--seed", str(SEED), "--batch_size", "1", "--verbosity", "ERROR"]
+    if LIMIT:
+        cmd += ["--limit", str(LIMIT)]
+    if TASK_INFO[task]["type"] == "gen":
+        cmd += ["--gen_kwargs", "do_sample=False"]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(MERA_REPO_DIR)
+    env["TOKENIZERS_PARALLELISM"] = "false"
+    env["HF_DATASETS_IN_MEMORY_MAX_SIZE"] = "23400000"
+    env["HF_TOKEN"] = os.environ.get("HF_TOKEN", "")
+    t0 = time.time()
+    try:
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=7200)
+    except subprocess.TimeoutExpired:
+        print(f"  ❌ [{get_time()}] {task}: таймаут CLI > 2 ч")
+        return None
+    wall_s = round(time.time() - t0, 1)
+
+    task_log_dir = RAW_LOGS_DIR / quant_name / task
+    task_log_dir.mkdir(parents=True, exist_ok=True)
+    for f in out_dir.rglob("results_*.json"):
+        shutil.copy2(f, task_log_dir / f.name)
+    for f in out_dir.rglob(f"samples_{task}_*.jsonl"):
+        shutil.copy2(f, task_log_dir / f.name)
+    (task_log_dir / "task_meta.json").write_text(
+        json.dumps({"quant": quant_name, "task": task, "wall_s": wall_s,
+                    "exit_code": result.returncode, "cmd": cmd,
+                    "stderr_tail": result.stderr[-2000:]}, ensure_ascii=False, indent=1),
+        encoding="utf-8")
+    if result.returncode != 0:
+        print(f"  ❌ [{get_time()}] {task}: exit {result.returncode}: {result.stderr[-400:]}")
+        return None
+    parsed = parse_task_metrics(quant_name, task)
+    if parsed is not None:
+        parsed["wall_s"] = wall_s
+    return parsed
+
+def parse_task_metrics(quant_name, task):
+    files = sorted((RAW_LOGS_DIR / quant_name / task).glob("results_*.json"),
+                   key=lambda p: p.stat().st_mtime)
+    if not files:
+        return None
+    raw = json.loads(files[-1].read_text(encoding="utf-8"))
+    res = (raw.get("results") or {}).get(task)
+    if not isinstance(res, dict):
+        return None
+    metrics = {k: v for k, v in res.items() if isinstance(v, (int, float))}
+    primary_key = TASK_INFO[task]["primary_key"]
+    if primary_key == "mcc_mean":
+        mcc = [v for k, v in res.items() if k.startswith("mcc_") and isinstance(v, (int, float))]
+        primary = round(sum(mcc) / len(mcc), 4) if mcc else None
+    else:
+        primary = res.get(primary_key)
+        primary = round(primary, 4) if isinstance(primary, (int, float)) else None
+    return {"primary": primary, "metrics": metrics}
+
+# ---------- 6.6 Скачивание, место, очистка (логика v5) ----------
+def check_disk_space(required_gb):
+    free_gb = shutil.disk_usage("/").free / (1024 ** 3)
+    if free_gb < required_gb:
+        raise RuntimeError(f"⚠️ Мало места: свободно {free_gb:.1f} ГБ, требуется {required_gb:.1f} ГБ.")
+
+def download_model(filename):
+    print(f"  ⬇️ Скачивание {filename}...")
+    t0 = time.time()
+    path = hf_hub_download(repo_id=REPO_ID, filename=filename,
+                           local_dir=str(LOCAL_MODEL_DIR),
+                           token=os.environ.get("HF_TOKEN"))
+    size_gb = round(os.path.getsize(path) / (1024 ** 3), 2)
+    print(f"  ✅ {size_gb} ГБ за {time.time() - t0:.0f} сек")
+    return Path(path), size_gb
+
+def cleanup(model_path):
+    gc.collect()
+    time.sleep(1)
+    if model_path and os.path.exists(model_path):
+        os.remove(model_path)
+    hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
+    if hf_cache.exists():
+        shutil.rmtree(hf_cache, ignore_errors=True)
+    print("  🧹 Очистка выполнена (модель и HF-кэш удалены; raw_logs и чекпоинт не тронуты).")
+
+_required = ["get_available_quants", "select_reference_model", "short_name",
+             "load_checkpoint", "save_checkpoint", "get_tokenizer_path",
+             "kill_existing_server", "start_llama_server", "stop_llama_server",
+             "smoke_test_echo_logprobs", "run_task", "parse_task_metrics",
+             "check_disk_space", "download_model", "cleanup"]
+_missing = [n for n in _required if n not in globals()]
+assert not _missing, f"❌ Не определены функции: {_missing}"
+print(f"✅ Блок 6 завершён: {len(_required)} функций определены.")
+'''
+
 
 def md_cell(src: str) -> dict:
     return {"cell_type": "markdown", "id": "%08x" % random.getrandbits(32),
@@ -329,6 +621,7 @@ CELLS = [
     code_cell(BLOCK_03),
     code_cell(BLOCK_04),
     code_cell(BLOCK_05),
+    code_cell(BLOCK_06),
 ]
 
 
