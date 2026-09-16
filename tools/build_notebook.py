@@ -664,7 +664,7 @@ def evaluate_quant(q_info, is_reference=False):
         cleanup(model_path)
 
 # ---------- ЭТАП 0: эталон (BF16 → Q8_0) ----------
-if REF_NAME in done and any(t in done[REF_NAME] for t in TASKS):
+if REF_NAME in done and all(t in done[REF_NAME] for t in TASKS):
     print(f"\\n⏭️ ЭТАП 0: эталон {REF_NAME} уже посчитан (чекпоинт).")
 else:
     print(f"\\n{'=' * 70}\\n🏁 ЭТАП 0: ЭТАЛОН {ref_q['filename']}\\n{'=' * 70}")
