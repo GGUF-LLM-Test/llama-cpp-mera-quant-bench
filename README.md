@@ -69,27 +69,13 @@ MERA держит ответы тестов закрытыми для больш
 
 ## Совместимость с transformers
 
-Форк MERA (база LM-Harness v0.4.8) импортирует `AutoModelForVision2Seq`, которого нет в
-transformers 5.x. Решение: **pin `transformers>=4.44,<5.00`** — проверено прогоном
-RU_LLM_Benchmarks V6.1 ровно на этом стеке (local-completions + llama-server). Если
-будущий образ Colab не позволит ставить 4.x — фолбэк (патч двух файлов форка, подход из
-серии MERA vLLM v2):
-
-```python
-TARGET_FILES = ["lm_eval/models/huggingface.py", "lm_eval/models/hf_vlms.py"]
-for fp in [f"{LM_EVAL_PATH}/{t}" for t in TARGET_FILES]:
-    content = open(fp, encoding="utf-8").read()
-    if "AutoModelForVision2Seq" not in content:
-        continue
-    content = content.replace(
-        "from transformers import AutoModelForVision2Seq",
-        "from transformers import AutoModelForCausalLM as AutoModelForVision2Seq")
-    content = content.replace(
-        "transformers.AutoModelForVision2Seq",
-        "getattr(transformers, 'AutoModelForImageTextToText', "
-        "getattr(transformers, 'AutoModelForVision2Seq', type(None)))")
-    open(fp, "w", encoding="utf-8").write(content)
-```
+С 11.09.2026 сабмодуль MERA — `artemorloff/lm-evaluation-harness @ feat/text_benches`
+(lm-eval 0.4.13.dev0, [коммит 8698451](https://github.com/MERA-Evaluation/MERA/commit/8698451dd7c281462c684190c9e38d2fae0f6d7a)):
+промпты всех задач сверены побайтово со старым пином. Форк совместим с
+предустановленным в Colab transformers 5.x из коробки (`AutoModelForVision2Seq`
+предоставляется через `lm_eval.models.transformers_compat`), баг логирования
+`api_models.py` (UnboundLocalError, маскировавший реальные сбои) исправлен upstream.
+Пины, патчи и sys.path-обходы не нужны: `pip install -e ".[api]"` — и всё работает.
 
 ## Ограничения
 

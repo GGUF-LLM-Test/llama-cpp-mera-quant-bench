@@ -119,12 +119,15 @@ PRESETS = {
   - `SAVE_DIR = /content/drive/MyDrive/{PUBLISHER}_{MODEL}_MERA_Quant_Results`,
     `RAW_LOGS_DIR = SAVE_DIR/raw_logs`, `CHECKPOINT_PATH = SAVE_DIR/checkpoint.json`;
   - печать выбранного пресета: задачи, few-shot из YAML, примеры, оценка времени.
-- **Блок 4. Установка MERA** — перенос Блока 1.1 из V6.1: pin `transformers>=4.44,<5.00`
-  (обоснование выбора подхода — см. §10.1), `git clone --recurse-submodules
-  https://github.com/MERA-Evaluation/MERA.git`, `pip install -e
-  ./MERA/lm-evaluation-harness`, патч логирования `api_models.py`, минимальные зависимости
-  (`openai`, `datasets`, `pandas`, …). Проверка `lm_eval --help`. Фиксация фактических
-  версий `transformers` и `lm_eval` (в `config_meta` чекпоинта и в шапке отчётов).
+- **Блок 4. Установка MERA** — `git clone --recurse-submodules
+  https://github.com/MERA-Evaluation/MERA.git`, установка форка по официальной инструкции:
+  `pip install -e "./MERA/lm-evaluation-harness[api]"` (extra `api` — для бэкенда
+  local-completions). Проверка `lm_eval --help`. Фиксация фактических версий `transformers`
+  и `lm_eval` (в `config_meta` чекпоинта и в шапке отчётов).
+  *(Поправка 2026-09-16, после upstream-коммита
+  [8698451](https://github.com/MERA-Evaluation/MERA/commit/8698451dd7c281462c684190c9e38d2fae0f6d7a):
+  пин `transformers<5.00`, патч `api_models.py`, sys.path-манипуляции и отдельный список
+  зависимостей убраны — см. §10.1a.)*
 - **Блок 5. Развёртывание llama.cpp из архива**:
   1. SHA-256 архива против `manifest.json` (несовпадение — остановка с диагностикой);
   2. `tar -xzf` → `/content/llama_cpp_bin/`, `chmod +x llama-server`;
@@ -272,6 +275,28 @@ unreliable). Средний балл кванта = среднее первич�
 прогонами — фиксация версий в `config_meta` чекпоинта и в отчётах (§5, §8). Подход 2
 (код патча) задокументировать в README как фолбэк на случай, если будущий образ Colab
 не позволит установить transformers 4.x.
+
+### 10.1a. Поправка 2026-09-16: оба подхода устарели
+
+Upstream-коммит
+[8698451](https://github.com/MERA-Evaluation/MERA/commit/8698451dd7c281462c684190c9e38d2fae0f6d7a)
+(11.09.2026) переподнимает сабмодуль на `artemorloff/lm-evaluation-harness @
+feat/text_benches` (lm-eval 0.4.13.dev0, d85f735); промпты всех задач сверены
+побайтово. Проверено по коду d85f735: `hf_vlms.py` импортирует
+`AutoModelForVision2Seq` из `lm_eval.models.transformers_compat` (совместимость с
+transformers 5.x из коробки); баг логирования `api_models.py` (UnboundLocalError)
+исправлен upstream (`locals().get('outputs', ...)`); классический CLI `lm_eval` и все
+наши model_args (`num_concurrent`, `tokenized_requests`, `tokenizer_backend`,
+`timeout`) сохранены.
+
+**Новое решение: установка по официальной инструкции** — `pip install -e ".[api]"`,
+без пина, без патчей, без sys.path-манипуляций, без отдельного списка зависимостей
+(база форка покрывает datasets/sqlitedict/dill/sacrebleu/rouge-score; extra `[api]` —
+requests/aiohttp/tenacity/tqdm/tiktoken; transformers/torch/pandas/matplotlib/
+huggingface_hub — предустановлены в Colab; `openai` не нужен — TemplateAPI ходит через
+requests/aiohttp; `nest_asyncio` не нужен — lm_eval выполняется в subprocess).
+Следствие: форк пинит `numpy<1.27` → pip откатит numpy Colab до 1.26.x (протестировано
+мейнтейнерами). Фиксация версий в `config_meta` сохранена.
 
 ### 10.2. Прочие ограничения
 
