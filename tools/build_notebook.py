@@ -26,7 +26,7 @@ Google Drive возобновляет автоматом.
 6 функции · 7 цикл · 8 агрегация · 9 финал · 10 пересборка из логов.
 """
 
-EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2"]
+EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2", "БЛОК 3"]
 
 
 BLOCK_00 = """\
@@ -94,6 +94,94 @@ if free / 1e9 < 2.0:
     print("⚠️ ВНИМАНИЕ: на Диске меньше 2 ГБ — чекпоинт и сырые логи могут не сохраниться!")
 """
 
+BLOCK_03 = """\
+# @title БЛОК 3: КОНФИГУРАЦИЯ (менять параметры здесь)
+import torch
+
+# ---------- Модель (один прогон = одна модель) ----------
+PUBLISHER = "unsloth"
+BASE_MODEL_NAME = "Qwen3.5-9B"
+REPO_ID = f"{PUBLISHER}/{BASE_MODEL_NAME}-GGUF"
+
+# ---------- Пресет задач ----------
+PRESET = "all"   # "smoke" | "choice" | "generation" | "all"
+
+TASK_INFO = {
+    "bps":          {"type": "mc",  "primary_key": "acc,none",         "fewshot": 1, "desc": "Сбалансированные скобочные последовательности (код, математика)"},
+    "rummlu":       {"type": "mc",  "primary_key": "acc,none",         "fewshot": 1, "desc": "Русский MMLU — знания по 57 доменам (открытый диагностический сет)"},
+    "ruethics":     {"type": "mc",  "primary_key": "mcc_mean",         "fewshot": 0, "desc": "Этика: 5 измерений, метрика MCC"},
+    "ruhatespeech": {"type": "mc",  "primary_key": "acc,none",         "fewshot": 1, "desc": "Разметка токсичных комментариев"},
+    "ruhhh":        {"type": "mc",  "primary_key": "acc,none",         "fewshot": 0, "desc": "Helpful / Honest / Harmless"},
+    "simplear":     {"type": "gen", "primary_key": "exact_match,none", "fewshot": 2, "desc": "Арифметика: точный ответ (exact match)"},
+}
+
+PRESETS = {
+    "smoke": {"title": "Быстрая проверка пайплайна",
+               "tasks": ["bps", "simplear"], "limit": 20,
+               "hint": "~15 мин/квант. Проверяет ОБЕ механики: echo+logprobs (bps) и генерацию (simplear)."},
+    "choice": {"title": "Выбор ответа — знания и этика (loglikelihood)",
+               "tasks": ["bps", "rummlu", "ruethics", "ruhatespeech", "ruhhh"], "limit": 100,
+               "hint": "Чистый loglikelihood-путь: главный тест echo+logprobs (PR #27537)."},
+    "generation": {"title": "Генерация ответов (арифметика)",
+               "tasks": ["simplear"], "limit": 100,
+               "hint": "Свободная генерация ответов, метрика exact_match."},
+    "all": {"title": "Все локально оцениваемые задачи",
+               "tasks": list(TASK_INFO), "limit": 100,
+               "hint": "Полный прогон: несколько сессий, чекпоинт возобновит автоматом."},
+}
+
+assert PRESET in PRESETS, f"Неизвестный пресет {PRESET}: {list(PRESETS)}"
+TASKS = PRESETS[PRESET]["tasks"]
+LIMIT = PRESETS[PRESET]["limit"]   # None → дефолт пресета; можно задать своё число здесь
+
+# ---------- Параметры прогона ----------
+SEED = 1234            # официальный сид MERA
+SERVER_PORT = 8000
+MAX_VRAM_GB = None     # None → авто (VRAM GPU − 2 ГБ); можно задать вручную
+FORCE_RERUN = False    # True = игнорировать чекпоинт и пересчитать всё
+
+if MAX_VRAM_GB is None:
+    MAX_VRAM_GB = round(torch.cuda.get_device_properties(0).total_memory / 1e9 - 2.0, 1)
+
+# ---------- Сборка llama.cpp (архив на Drive) ----------
+_DRIVE = Path(DRIVE_ROOT) / "MyDrive"
+LLAMA_CPP_ARCHIVE = str(_DRIVE / "llama.cpp_v0.4.1-pr27537-version" / "native" / "gpu_all.tar.gz")
+LLAMA_CPP_MANIFEST = str(_DRIVE / "llama.cpp_v0.4.1-pr27537-version" / "manifest.json")
+
+# ---------- Пути вывода ----------
+SAVE_DIR = _DRIVE / f"{PUBLISHER}_{BASE_MODEL_NAME}_MERA_Quant_Results"
+RAW_LOGS_DIR = SAVE_DIR / "raw_logs"
+CHECKPOINT_PATH = str(SAVE_DIR / "checkpoint.json")
+
+MERA_REPO_DIR = Path("./MERA").resolve()
+LM_EVAL_PATH = MERA_REPO_DIR / "lm-evaluation-harness"
+MERA_TASKS_PATH = MERA_REPO_DIR / "benchmark_tasks"
+
+LOCAL_MODEL_DIR = Path("./models").resolve()
+LOCAL_BIN_DIR = Path("./llama_cpp_bin").resolve()
+LOG_DIR = Path("./logs").resolve()
+LOCAL_RESULTS_DIR = Path("./results").resolve()
+
+for d in (SAVE_DIR, RAW_LOGS_DIR, MERA_REPO_DIR.parent, LOCAL_MODEL_DIR, LOCAL_BIN_DIR, LOG_DIR, LOCAL_RESULTS_DIR):
+    d.mkdir(parents=True, exist_ok=True)
+
+def get_time():
+    return datetime.now().strftime("%H:%M:%S")
+
+print("=" * 70)
+print(f"🎯 Модель: {REPO_ID}")
+print(f"📋 Пресет «{PRESETS[PRESET]['title']}» — задач: {len(TASKS)}, LIMIT={LIMIT}")
+print(f"   {PRESETS[PRESET]['hint']}")
+for t in TASKS:
+    info = TASK_INFO[t]
+    kind = "loglikelihood" if info["type"] == "mc" else "генерация"
+    print(f"   • {t:14s} [{kind}, {info['fewshot']}-shot] — {info['desc']}")
+print(f"🎲 seed={SEED}, порт={SERVER_PORT}, VRAM-лимит={MAX_VRAM_GB} ГБ, FORCE_RERUN={FORCE_RERUN}")
+print(f"📦 llama.cpp: {LLAMA_CPP_ARCHIVE}")
+print(f"📂 Результаты: {SAVE_DIR}")
+print("=" * 70)
+"""
+
 
 def md_cell(src: str) -> dict:
     return {"cell_type": "markdown", "id": "%08x" % random.getrandbits(32),
@@ -111,6 +199,7 @@ CELLS = [
     code_cell(BLOCK_00),
     code_cell(BLOCK_01),
     code_cell(BLOCK_02),
+    code_cell(BLOCK_03),
 ]
 
 
