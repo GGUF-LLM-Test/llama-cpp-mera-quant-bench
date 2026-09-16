@@ -28,7 +28,7 @@ Google Drive возобновляет автоматом.
 6 функции · 7 цикл · 8 агрегация · 9 финал · 10 пересборка из логов.
 """
 
-EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2", "БЛОК 3", "БЛОК 4", "БЛОК 5", "БЛОК 6", "БЛОК 7"]
+EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2", "БЛОК 3", "БЛОК 4", "БЛОК 5", "БЛОК 6", "БЛОК 7", "БЛОК 8"]
 
 
 BLOCK_00 = """\
@@ -684,6 +684,120 @@ for q in all_quants:
 print(f"\\n🏁 [{get_time()}] ЦИКЛ ЗАВЕРШЁН. Переходите к Блоку 8.")
 """
 
+BLOCK_08 = '''\
+# @title БЛОК 8: АГРЕГАЦИЯ, ДЕГРАДАЦИЯ, ГРАФИКИ, ОТЧЁТ
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+state = json.loads(Path(CHECKPOINT_PATH).read_text(encoding="utf-8"))
+done = state["done"]
+meta = state.get("config_meta", {})
+
+rows = []
+for name, cell in done.items():
+    row = {"Quant": name, "Size_GB": cell.get("size_gb"),
+           "Is_Ref": bool(cell.get("is_reference"))}
+    for t in TASKS:
+        row[t] = (cell.get(t) or {}).get("primary")
+    rows.append(row)
+df = pd.DataFrame(rows).sort_values("Size_GB").reset_index(drop=True)
+
+ref_rows = df[df["Is_Ref"]]
+ref_row = ref_rows.iloc[0] if len(ref_rows) else None
+
+# Правило ненадёжности: у эталона метрика None/NaN/0 → задача исключается из средних
+unreliable = []
+for t in TASKS:
+    v = ref_row.get(t) if ref_row is not None else None
+    if v is None or (isinstance(v, float) and (np.isnan(v) or v == 0)):
+        unreliable.append(t)
+reliable = [t for t in TASKS if t not in unreliable]
+if unreliable:
+    print(f"⚠️ Ненадёжные задачи (у эталона 0/нет данных), исключены из средних: {unreliable}")
+
+df["AvgScore"] = df[reliable].mean(axis=1) if reliable else np.nan
+ref_avg = float(ref_row["AvgScore"]) if ref_row is not None and not pd.isna(ref_row.get("AvgScore", np.nan)) else np.nan
+df["Delta_pp"] = (df["AvgScore"] - ref_avg) * 100
+df["Delta_pct"] = (df["AvgScore"] / ref_avg - 1) * 100 if ref_avg else np.nan
+for t in reliable:
+    df[f"{t}_dpp"] = (df[t] - float(ref_row[t])) * 100
+
+pd.set_option("display.width", 200)
+pd.set_option("display.max_columns", 50)
+cols = ["Quant", "Size_GB", "Is_Ref"] + reliable + ["AvgScore", "Delta_pp", "Delta_pct"]
+display(df[[c for c in cols if c in df.columns]].round(4))
+
+df.to_csv(SAVE_DIR / "mera_results.csv", index=False, encoding="utf-8")
+df[["Quant", "Size_GB", "Is_Ref", "AvgScore", "Delta_pp", "Delta_pct"]].round(4) \
+    .to_csv(SAVE_DIR / "degradation.csv", index=False, encoding="utf-8")
+
+# ---------- Графики ----------
+sns_style = plt.style.context("default")
+fig, axes = plt.subplots(1 + (len(reliable) + 3) // 4, 4, figsize=(20, 4.5 * (1 + (len(reliable) + 3) // 4)))
+axes = np.atleast_2d(axes).ravel()
+panels = reliable + ["AvgScore"]
+for ax, t in zip(axes, panels):
+    sub = df.dropna(subset=[t]) if t in df.columns else df.dropna(subset=["AvgScore"])
+    ax.plot(sub["Size_GB"], sub[t], "o-")
+    for _, r in sub.iterrows():
+        ax.annotate(r["Quant"], (r["Size_GB"], r[t]), fontsize=7,
+                    xytext=(0, 5), textcoords="offset points", ha="center")
+    ax.set_xlabel("Размер, ГБ")
+    ax.set_title(t + (" (среднее)" if t == "AvgScore" else ""), fontweight="bold")
+    if t != "AvgScore" and ref_row is not None and not pd.isna(ref_row.get(t, np.nan)):
+        ax.axhline(float(ref_row[t]), color="gray", ls=":", lw=1)
+for ax in axes[len(panels):]:
+    ax.axis("off")
+fig.suptitle(f"Деградация метрик MERA: {REPO_ID} (пресет {PRESET}, LIMIT={LIMIT})", fontweight="bold")
+fig.tight_layout()
+fig.savefig(SAVE_DIR / "degradation_plots.png", dpi=200, bbox_inches="tight")
+plt.show()
+
+# ---------- Heatmap Δ п.п. ----------
+if reliable:
+    hm = df.set_index("Quant")[[f"{t}_dpp" for t in reliable]].round(2)
+    fig2, ax2 = plt.subplots(figsize=(1.6 * len(reliable) + 4, 0.5 * len(hm) + 2))
+    im = ax2.imshow(hm.values, cmap="RdYlGn", aspect="auto")
+    ax2.set_xticks(range(len(hm.columns)), hm.columns, rotation=30, ha="right")
+    ax2.set_yticks(range(len(hm.index)), hm.index)
+    for i in range(hm.shape[0]):
+        for j in range(hm.shape[1]):
+            v = hm.values[i, j]
+            if not np.isnan(v):
+                ax2.text(j, i, f"{v:+.1f}", ha="center", va="center", fontsize=8)
+    fig2.colorbar(im, label="Δ к эталону, п.п.")
+    ax2.set_title("Деградация по задачам (п.п., меньше — хуже)", fontweight="bold")
+    fig2.tight_layout()
+    fig2.savefig(SAVE_DIR / "degradation_heatmap.png", dpi=200, bbox_inches="tight")
+    plt.show()
+
+# ---------- MD-отчёт ----------
+def _md_table(dframe, floatfmt=4):
+    d = dframe.round(floatfmt)
+    head = "| " + " | ".join(d.columns) + " |"
+    sep = "|" + "---|" * len(d.columns)
+    body = "\\n".join("| " + " | ".join(str(v) for v in row) + " |" for row in d.astype(object).values)
+    return "\\n".join([head, sep, body])
+
+md = []
+md.append(f"# Деградация MERA по квантам: {REPO_ID}")
+md.append(f"**Пресет:** {PRESET} ({PRESETS[PRESET]['title']}), LIMIT={LIMIT}, seed={SEED}")
+md.append(f"**Эталон:** {REF_NAME}")
+md.append(f"**Среда:** transformers {meta.get('transformers_version')} · lm-eval {meta.get('lm_eval_version')} · "
+          f"llama.cpp {LLAMA_BUILD_INFO['branch']}@{LLAMA_BUILD_INFO['commit']} (CUDA {LLAMA_BUILD_INFO['cuda']})")
+md.append(f"**GPU:** {torch.cuda.get_device_properties(0).name}")
+if unreliable:
+    md.append(f"\\n⚠️ **Ненадёжные задачи** (у эталона 0/нет данных — исключены из средних): {', '.join(unreliable)}")
+md.append("\\n## Сводная таблица\\n")
+md.append(_md_table(df[[c for c in cols if c in df.columns]]))
+md.append("\\n## Деградация по задачам (Δ п.п.)\\n")
+md.append(_md_table(df[["Quant", "Size_GB"] + [f"{t}_dpp" for t in reliable]]) if reliable else "Нет надёжных задач.")
+(SAVE_DIR / "mera_quant_report.md").write_text("\\n".join(md), encoding="utf-8")
+print(f"\\n💾 Сохранено в {SAVE_DIR}: mera_results.csv, degradation.csv, degradation_plots.png, "
+      f"degradation_heatmap.png, mera_quant_report.md")
+'''
+
 
 def md_cell(src: str) -> dict:
     return {"cell_type": "markdown", "id": "%08x" % random.getrandbits(32),
@@ -706,6 +820,7 @@ CELLS = [
     code_cell(BLOCK_05),
     code_cell(BLOCK_06),
     code_cell(BLOCK_07),
+    code_cell(BLOCK_08),
 ]
 
 
