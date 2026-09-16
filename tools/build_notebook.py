@@ -28,7 +28,7 @@ Google Drive возобновляет автоматом.
 6 функции · 7 цикл · 8 агрегация · 9 финал · 10 пересборка из логов.
 """
 
-EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2", "БЛОК 3", "БЛОК 4", "БЛОК 5", "БЛОК 6"]
+EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2", "БЛОК 3", "БЛОК 4", "БЛОК 5", "БЛОК 6", "БЛОК 7"]
 
 
 BLOCK_00 = """\
@@ -603,6 +603,87 @@ assert not _missing, f"❌ Не определены функции: {_missing}"
 print(f"✅ Блок 6 завершён: {len(_required)} функций определены.")
 '''
 
+BLOCK_07 = """\
+# @title БЛОК 7: ОСНОВНОЙ ЦИКЛ (ЭТАП 0 — эталон, ЭТАП 1 — кванты)
+state = load_checkpoint()
+done = state["done"]
+
+all_quants = get_available_quants(REPO_ID)
+ref_q = select_reference_model(all_quants, MAX_VRAM_GB)
+if ref_q is None:
+    raise RuntimeError(f"❌ Ни один квант не влезает в {MAX_VRAM_GB} ГБ VRAM.")
+REF_NAME = short_name(ref_q["filename"])
+print(f"🏆 Эталон: {ref_q['filename']} ({ref_q['size_gb']:.1f} ГБ)")
+
+def evaluate_quant(q_info, is_reference=False):
+    name = short_name(q_info["filename"])
+    pending = [t for t in TASKS if not (name in done and t in done.get(name, {}) and t != "size_gb")]
+    pending = [t for t in pending if t in TASK_INFO]
+    if name in done and not pending:
+        print(f"⏭️ [{get_time()}] {name}: все задачи готовы (чекпоинт).")
+        return
+    print(f"\\n{'=' * 70}\\n▶ [{get_time()}] {name} ({q_info['size_gb']:.1f} ГБ), задач: {len(pending)}\\n{'=' * 70}")
+    check_disk_space(q_info["size_gb"] * 2.2 + 5.0)
+    model_path = None
+    server = None
+    try:
+        kill_existing_server(SERVER_PORT)
+        model_path, _size = download_model(q_info["filename"])
+        tokenizer_path = get_tokenizer_path(REPO_ID)
+        print(f"  🚀 [{get_time()}] Запуск llama-server (seed={SEED})...")
+        server = start_llama_server(model_path, SERVER_PORT, alias=REPO_ID.replace("-GGUF", ""))
+        if is_reference:
+            ok, msg = smoke_test_echo_logprobs(SERVER_PORT)
+            print(f"  🧪 Гейт echo/logprobs: {msg}")
+            if not ok:
+                raise RuntimeError(
+                    "❌ Сборка llama-server не отдаёт echo+logprobs — loglikelihood-задачи "
+                    "не пройдут. Проверьте архив (PR #27537) и Блок 5. Прогон остановлен "
+                    "ДО траты GPU-времени.")
+        row = done.setdefault(name, {})
+        row["size_gb"] = q_info["size_gb"]
+        if is_reference:
+            row["is_reference"] = True
+            state["reference"] = name
+        for task in pending:
+            print(f"  🧪 [{get_time()}] {task} ...", end=" ", flush=True)
+            res = run_task(name, task, REPO_ID.replace("-GGUF", ""), tokenizer_path)
+            if res is None:
+                print("❌ (не в чекпоинт — повторится при следующем запуске)")
+                continue
+            row[task] = res
+            save_checkpoint(state)
+            print(f"✅ primary={res['primary']} ({res['wall_s']} c)")
+        save_checkpoint(state)
+    except KeyboardInterrupt:
+        print(f"\\n⏹️ [{get_time()}] {name}: прервано. Выполненное — в чекпоинте.")
+    finally:
+        if server:
+            stop_llama_server(*server)
+        kill_existing_server(SERVER_PORT)
+        cleanup(model_path)
+
+# ---------- ЭТАП 0: эталон (BF16 → Q8_0) ----------
+if REF_NAME in done and any(t in done[REF_NAME] for t in TASKS):
+    print(f"\\n⏭️ ЭТАП 0: эталон {REF_NAME} уже посчитан (чекпоинт).")
+else:
+    print(f"\\n{'=' * 70}\\n🏁 ЭТАП 0: ЭТАЛОН {ref_q['filename']}\\n{'=' * 70}")
+    evaluate_quant(ref_q, is_reference=True)
+
+# ---------- ЭТАП 1: остальные кванты ----------
+print(f"\\n{'=' * 70}\\n🔄 ЭТАП 1: ОСТАЛЬНЫЕ КВАНТЫ\\n{'=' * 70}")
+for q in all_quants:
+    name = short_name(q["filename"])
+    if name == REF_NAME:
+        continue
+    if q["size_gb"] + 4.0 > MAX_VRAM_GB:
+        print(f"⏭️ {name}: не влезает в VRAM ({q['size_gb']:.1f} ГБ + 4 ГБ > {MAX_VRAM_GB} ГБ)")
+        continue
+    evaluate_quant(q)
+
+print(f"\\n🏁 [{get_time()}] ЦИКЛ ЗАВЕРШЁН. Переходите к Блоку 8.")
+"""
+
 
 def md_cell(src: str) -> dict:
     return {"cell_type": "markdown", "id": "%08x" % random.getrandbits(32),
@@ -624,6 +705,7 @@ CELLS = [
     code_cell(BLOCK_04),
     code_cell(BLOCK_05),
     code_cell(BLOCK_06),
+    code_cell(BLOCK_07),
 ]
 
 
