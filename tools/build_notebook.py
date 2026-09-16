@@ -135,6 +135,7 @@ PRESETS = {
 assert PRESET in PRESETS, f"Неизвестный пресет {PRESET}: {list(PRESETS)}"
 TASKS = PRESETS[PRESET]["tasks"]
 LIMIT = PRESETS[PRESET]["limit"]   # None → дефолт пресета; можно задать своё число здесь
+assert isinstance(LIMIT, int) and LIMIT > 0, "LIMIT должен быть положительным целым числом"
 
 # ---------- Параметры прогона ----------
 SEED = 1234            # официальный сид MERA
@@ -390,17 +391,21 @@ def get_tokenizer_path(repo_id):
     safe = base_repo.replace("/", "_")
     local_dir = LOCAL_MODEL_DIR / f"tokenizer_{safe}"
     drive_dir = SAVE_DIR / "tokenizers" / f"tokenizer_{safe}"
-    if drive_dir.exists() and any(drive_dir.iterdir()):
-        if not local_dir.exists():
-            shutil.copytree(drive_dir, local_dir, dirs_exist_ok=True)
-        return str(local_dir)
+
+    # 1. Локально есть и непусто → идём дальше; иначе восполняем
     if not (local_dir.exists() and any(local_dir.iterdir())):
-        print(f"  ⬇️ Токенизатор {base_repo}...")
-        snapshot_download(repo_id=base_repo, local_dir=str(local_dir),
-                          allow_patterns=["tokenizer*", "special_tokens_map.json",
-                                          "tokenizer_config.json", "vocab.json",
-                                          "merges.txt", "*.model", "config.json"],
-                          token=os.environ.get("HF_TOKEN"))
+        if drive_dir.exists() and any(drive_dir.iterdir()):
+            print(f"  📥 Токенизатор из кэша Drive...")
+            shutil.copytree(drive_dir, local_dir, dirs_exist_ok=True)
+        else:
+            print(f"  ⬇️ Токенизатор {base_repo}...")
+            snapshot_download(repo_id=base_repo, local_dir=str(local_dir),
+                              allow_patterns=["tokenizer*", "special_tokens_map.json",
+                                              "tokenizer_config.json", "vocab.json",
+                                              "merges.txt", "*.model", "config.json"],
+                              token=os.environ.get("HF_TOKEN"))
+
+    # 2. Идемпотентный патч config.json (int → float) — на любом пути
     cfg = local_dir / "config.json"
     if cfg.exists():
         try:
@@ -414,10 +419,13 @@ def get_tokenizer_path(repo_id):
                 cfg.write_text(json.dumps(config, indent=2), encoding="utf-8")
         except Exception as e:
             print(f"  ⚠️ Патч config.json не удался: {e}")
-    drive_dir.mkdir(parents=True, exist_ok=True)
-    for item in local_dir.iterdir():
-        if item.is_file():
-            shutil.copy2(item, drive_dir / item.name)
+
+    # 3. Backup на Drive, только если там пусто
+    if not (drive_dir.exists() and any(drive_dir.iterdir())):
+        drive_dir.mkdir(parents=True, exist_ok=True)
+        for item in local_dir.iterdir():
+            if item.is_file():
+                shutil.copy2(item, drive_dir / item.name)
     return str(local_dir)
 '''
 
@@ -433,8 +441,8 @@ def kill_existing_server(port):
     subprocess.run("pkill -9 -f llama-server", shell=True, capture_output=True)
 
 def start_llama_server(model_path, port, alias):
-    stdout_f = open(LOG_DIR / "server_stdout.log", "w", encoding="utf-8")
-    stderr_f = open(LOG_DIR / "server_stderr.log", "w", encoding="utf-8")
+    stdout_f = open(LOG_DIR / "server_stdout.log", "a", encoding="utf-8")
+    stderr_f = open(LOG_DIR / "server_stderr.log", "a", encoding="utf-8")
     cmd = [LLAMA_SERVER_BIN, "-m", str(model_path),
            "--host", "127.0.0.1", "--port", str(port),
            "-ngl", "-1", "-c", "8192", "-b", "2048", "-t", "8",
@@ -540,12 +548,16 @@ def run_task(quant_name, task, base_repo, tokenizer_path):
                     "exit_code": result.returncode, "cmd": cmd,
                     "stderr_tail": result.stderr[-2000:]}, ensure_ascii=False, indent=1),
         encoding="utf-8")
-    if result.returncode != 0:
-        print(f"  ❌ [{get_time()}] {task}: exit {result.returncode}: {result.stderr[-400:]}")
-        return None
     parsed = parse_task_metrics(quant_name, task)
     if parsed is not None:
         parsed["wall_s"] = wall_s
+    if result.returncode != 0 or parsed is None:
+        src_log = LOG_DIR / "server_stderr.log"
+        if src_log.exists():
+            shutil.copy2(src_log, task_log_dir / "server_stderr.log")
+    if result.returncode != 0:
+        print(f"  ❌ [{get_time()}] {task}: exit {result.returncode}: {result.stderr[-400:]}")
+        return None
     return parsed
 
 def parse_task_metrics(quant_name, task):
@@ -657,6 +669,7 @@ def evaluate_quant(q_info, is_reference=False):
         save_checkpoint(state)
     except KeyboardInterrupt:
         print(f"\\n⏹️ [{get_time()}] {name}: прервано. Выполненное — в чекпоинте.")
+        raise
     finally:
         if server:
             stop_llama_server(*server)
@@ -824,7 +837,7 @@ for _, r in sub.iterrows():
 ax1.set_xlabel("Размер, ГБ"); ax1.set_ylabel("Средний балл MERA")
 ax1.set_title(f"Средний балл vs размер · {BASE_MODEL_NAME}", fontweight="bold")
 
-pts = sub[~sub["Is_Ref"]].sort_values("AvgScore", ascending=False)
+pts = sub[~sub["Is_Ref"]].sort_values(["AvgScore", "Size_GB"], ascending=[False, True])
 front, best = [], np.inf
 for _, r in pts.iterrows():
     if r["Size_GB"] < best:
