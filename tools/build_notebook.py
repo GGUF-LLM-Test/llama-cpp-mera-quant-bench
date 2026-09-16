@@ -26,7 +26,73 @@ Google Drive возобновляет автоматом.
 6 функции · 7 цикл · 8 агрегация · 9 финал · 10 пересборка из логов.
 """
 
-EXPECTED_BLOCKS = []  # заполняется по мере добавления ячеек
+EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2"]
+
+
+BLOCK_00 = """\
+# @title БЛОК 0: ДИАГНОСТИКА ОКРУЖЕНИЯ
+import os, shutil, subprocess, time, json, gc
+from pathlib import Path
+from datetime import datetime
+import torch
+
+print(f"🖥️ Диагностика: {datetime.now():%Y-%m-%d %H:%M:%S}")
+if not torch.cuda.is_available():
+    raise RuntimeError("❌ GPU не найден. Среда выполнения → Сменить среду выполнения → T4/L4/A100.")
+
+props = torch.cuda.get_device_properties(0)
+print(f"  GPU: {props.name} ({props.total_memory / 1e9:.1f} ГБ VRAM, CC {props.major}.{props.minor})")
+
+isa = subprocess.run("grep -o -m1 avx512f /proc/cpuinfo", shell=True,
+                     capture_output=True, text=True).stdout.strip()
+print(f"  CPU avx512f: {'✅' if isa else '❌ нет'} (сборка native требует AVX-512)")
+if not isa:
+    raise RuntimeError("❌ CPU без AVX-512: native-сборка llama.cpp не запустится. Нужен GPU-рантайм на Xeon (T4/L4/A100).")
+
+ram = {}
+with open("/proc/meminfo") as f:
+    for line in f:
+        if ":" in line:
+            k, v = line.split(":", 1)
+            ram[k] = int(v.split()[0])
+print(f"  RAM: {ram.get('MemTotal', 0) / 1e6:.1f} ГБ (доступно {ram.get('MemAvailable', 0) / 1e6:.1f} ГБ)")
+total, used, free = shutil.disk_usage("/")
+print(f"  Диск: свободно {free / 1e9:.1f} ГБ")
+print("✅ Блок 0 завершён.")
+"""
+
+BLOCK_01 = """\
+# @title БЛОК 1: ТОКЕН HUGGING FACE
+from google.colab import userdata
+from huggingface_hub import HfApi
+
+hf_token = userdata.get("HF_TOKEN")
+if not hf_token or not str(hf_token).strip():
+    print("⚠️ Токен HF_TOKEN не найден в секретах Colab. Модели из приватных репо будут недоступны.")
+    os.environ["HF_TOKEN"] = ""
+else:
+    try:
+        user = HfApi().whoami(token=hf_token)
+        print(f"✅ Токен проверен. Добро пожаловать, {user.get('name', 'пользователь')}!")
+        os.environ["HF_TOKEN"] = str(hf_token).strip()
+    except Exception as e:
+        print(f"❌ Токен недействителен: {e}")
+        os.environ["HF_TOKEN"] = ""
+"""
+
+BLOCK_02 = """\
+# @title БЛОК 2: GOOGLE DRIVE И СВОБОДНОЕ МЕСТО
+from google.colab import drive
+
+print("💾 Монтирование Google Drive...")
+drive.mount("/content/drive", force_remount=False)
+DRIVE_ROOT = "/content/drive"
+
+total, used, free = shutil.disk_usage(DRIVE_ROOT)
+print(f"💾 Свободно на Google Диске: {free / 1e9:.2f} ГБ")
+if free / 1e9 < 2.0:
+    print("⚠️ ВНИМАНИЕ: на Диске меньше 2 ГБ — чекпоинт и сырые логи могут не сохраниться!")
+"""
 
 
 def md_cell(src: str) -> dict:
@@ -42,6 +108,9 @@ def code_cell(src: str) -> dict:
 
 CELLS = [
     md_cell(MD_INTRO),
+    code_cell(BLOCK_00),
+    code_cell(BLOCK_01),
+    code_cell(BLOCK_02),
 ]
 
 
