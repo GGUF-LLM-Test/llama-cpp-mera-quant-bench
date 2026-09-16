@@ -119,10 +119,12 @@ PRESETS = {
   - `SAVE_DIR = /content/drive/MyDrive/{PUBLISHER}_{MODEL}_MERA_Quant_Results`,
     `RAW_LOGS_DIR = SAVE_DIR/raw_logs`, `CHECKPOINT_PATH = SAVE_DIR/checkpoint.json`;
   - печать выбранного пресета: задачи, few-shot из YAML, примеры, оценка времени.
-- **Блок 4. Установка MERA** — перенос Блока 1.1 из V6.1: pin `transformers>=4.44,<5.00`,
-  `git clone --recurse-submodules https://github.com/MERA-Evaluation/MERA.git`,
-  `pip install -e ./MERA/lm-evaluation-harness`, патч логирования `api_models.py`,
-  минимальные зависимости (`openai`, `datasets`, `pandas`, …). Проверка `lm_eval --help`.
+- **Блок 4. Установка MERA** — перенос Блока 1.1 из V6.1: pin `transformers>=4.44,<5.00`
+  (обоснование выбора подхода — см. §10.1), `git clone --recurse-submodules
+  https://github.com/MERA-Evaluation/MERA.git`, `pip install -e
+  ./MERA/lm-evaluation-harness`, патч логирования `api_models.py`, минимальные зависимости
+  (`openai`, `datasets`, `pandas`, …). Проверка `lm_eval --help`. Фиксация фактических
+  версий `transformers` и `lm_eval` (в `config_meta` чекпоинта и в шапке отчётов).
 - **Блок 5. Развёртывание llama.cpp из архива**:
   1. SHA-256 архива против `manifest.json` (несовпадение — остановка с диагностикой);
   2. `tar -xzf` → `/content/llama_cpp_bin/`, `chmod +x llama-server`;
@@ -133,8 +135,11 @@ PRESETS = {
   - `select_reference_model(quants, max_vram)` — BF16 → Q8_0 → крупнейший влезающий;
   - `short_name(filename)`;
   - чекпоинт: `load_checkpoint` / `save_checkpoint` (атомарно через `.tmp` + `os.replace`),
-    в чекпоинте `config_meta = {repo_id, preset, limit, seed, tasks}`; при несовпадении с
-    текущим конфигом — предупреждение и требование `FORCE_RERUN=True` (или удалить папку);
+    в чекпоинте `config_meta = {repo_id, preset, limit, seed, tasks, transformers_version,
+    lm_eval_version, llama_cpp_sha256}`; несовпадение содержательной части
+    (repo/preset/limit/seed/tasks) — остановка с требованием `FORCE_RERUN=True` (или
+    удалить папку); дрейф версий библиотек — предупреждение (прогон продолжается,
+    пометка в отчёт);
   - `get_tokenizer_path(repo_id)` — кэш на Диске → локально → скачивание
     (`snapshot_download` только файлы токенизатора), патч `config.json` int→float
     (`routed_scaling_factor` и др., из V6.1 — актуально для MoE-моделей);
@@ -234,7 +239,8 @@ unreliable). Средний балл кванта = среднее первич�
 | Ошибка кванта (скачивание/сервер) | квант помечен Error, цикл продолжается |
 | Квант не влезает в VRAM | skip с пометкой |
 | KeyboardInterrupt / Stop Colab | `finally`: остановка сервера; готовое сохранено в чекпоинт |
-| Чекпоинт с другим config_meta | предупреждение, требование FORCE_RERUN или удаления папки |
+| Чекпоинт: другой repo/preset/limit/seed/tasks | остановка: `FORCE_RERUN=True` или удалить папку |
+| Чекпоинт: дрейф версий (transformers/lm_eval/llama.cpp) | предупреждение; версии фиксируются в отчёте |
 | Повторный запуск | skip готовых «квант × задача», докачка недостающих |
 
 ## 9. Верификация (без Colab)
@@ -250,6 +256,24 @@ unreliable). Средний балл кванта = среднее первич�
 сначала пресет `smoke` на одной модели.
 
 ## 10. Ограничения и риски
+
+### 10.1. Подход к совместимости форка lm-eval с transformers (выбор сделан)
+
+Проблема: форк (база LM-Harness v0.4.8) импортирует `AutoModelForVision2Seq`, удалённый
+в transformers 5.x → `import lm_eval` падает на любом бэкенде. В Drafts есть два решения:
+
+| Подход | Эмпирическое доказательство | Плюсы | Минусы |
+|---|---|---|---|
+| Pin `transformers>=4.44,<5.00` (V6.1, Блок 1.1) | V6.1: **local-completions + llama-server** — наш стек, полный успешный прогон (4.57.6) | простота (1 строка pip); клон MERA не мутируется; детерминированный диапазон версий | даунгрейд Colab-стека: ворнинги резолвера (gradio/huggingface-hub), в V6.1 доказано безвредны |
+| Патч двух файлов форка (`huggingface.py`, `hf_vlms.py`) под 5.x (MERA vLLM v2, CELL 2) | v2: hf-бэкенд, 23/23 задач, без пина | Colab-стек не трогает; патч идемпотентный, с getattr-фолбэками | **local-completions на 5.x не тестировался**; мутация клона (переприменение после re-clone); движется вместе с 5.x-минорками Colab |
+
+**Решение: pin (подход 1)** — единственный, доказанный именно нашим стеком; проще;
+не мутирует клон. Против остаточного риска дрейфа версий между многосессионными
+прогонами — фиксация версий в `config_meta` чекпоинта и в отчётах (§5, §8). Подход 2
+(код патча) задокументировать в README как фолбэк на случай, если будущий образ Colab
+не позволит установить transformers 4.x.
+
+### 10.2. Прочие ограничения
 
 - **Сборка `native`**: CPU-часть оптимизирована под машину сборки (AVX-512) → только
   GPU-рантаймы Colab на Xeon (T4/L4/A100); на no-GPU EPYC упадёт.
