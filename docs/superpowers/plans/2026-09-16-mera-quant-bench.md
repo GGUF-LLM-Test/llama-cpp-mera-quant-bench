@@ -123,12 +123,12 @@ def verify() -> None:
     for i, c in enumerate(code_cells):
         src = "".join(c["source"])
         ast.parse(src)  # SyntaxError → падение с номером ячейки
-    titles = ["".join(c["source"]).splitlines()[1] for c in code_cells]
+    titles = ["".join(c["source"]).splitlines()[0] for c in code_cells]
     for marker in EXPECTED_BLOCKS:
-        assert any(marker in t for t in titles), f"Не найден блок: {marker}"
+        assert any(marker + ":" in t for t in titles), f"Не найден блок: {marker}"
     pos = [-1]
     for marker in EXPECTED_BLOCKS:
-        idx = next(i for i, t in enumerate(titles) if marker in t)
+        idx = next(i for i, t in enumerate(titles) if marker + ":" in t)
         assert idx > pos[-1], f"Нарушен порядок блоков: {marker}"
         pos.append(idx)
     print(f"OK: {len(nb['cells'])} ячеек ({len(code_cells)} code), "
@@ -1171,7 +1171,7 @@ ax1.set_xlabel("Размер, ГБ"); ax1.set_ylabel("Средний балл ME
 ax1.set_title(f"Средний балл vs размер · {BASE_MODEL_NAME}", fontweight="bold")
 
 pts = sub[~sub["Is_Ref"]].sort_values("AvgScore", ascending=False)
-front, best = [], -np.inf
+front, best = [], np.inf
 for _, r in pts.iterrows():
     if r["Size_GB"] < best:
         front.append(r["Quant"]); best = r["Size_GB"]
