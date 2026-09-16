@@ -26,7 +26,7 @@ Google Drive возобновляет автоматом.
 6 функции · 7 цикл · 8 агрегация · 9 финал · 10 пересборка из логов.
 """
 
-EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2", "БЛОК 3", "БЛОК 4"]
+EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2", "БЛОК 3", "БЛОК 4", "БЛОК 5"]
 
 
 BLOCK_00 = """\
@@ -250,6 +250,61 @@ print(f"✅ Блок 4 завершён: lm_eval {LM_EVAL_VERSION} из {lm_eval
 print(f"   transformers {TRANSFORMERS_VERSION}, AutoModelForVision2Seq доступен.")
 """
 
+BLOCK_05 = """\
+# @title БЛОК 5: РАЗВЁРТЫВАНИЕ LLAMA.CPP ИЗ АРХИВА (SHA-256 по manifest.json)
+import hashlib
+
+def sha256_file(path, chunk=8 * 1024 * 1024):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(chunk), b""):
+            h.update(b)
+    return h.hexdigest()
+
+archive = Path(LLAMA_CPP_ARCHIVE)
+manifest_path = Path(LLAMA_CPP_MANIFEST)
+assert archive.exists(), f"❌ Архив не найден: {archive}"
+assert manifest_path.exists(), f"❌ manifest.json не найден: {manifest_path}"
+
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+art = manifest["артефакты"]["native/gpu_all"]
+print(f"📦 Архив: {archive} ({archive.stat().st_size / 1e6:.0f} МБ)")
+print(f"🔖 Сборка: {manifest['ветка']}, коммит {manifest['коммит']}, CUDA {manifest['cuda_архитектуры']['gpu_all']}")
+
+actual_sha = sha256_file(archive)
+if actual_sha.lower() != art["sha256_tar"].lower():
+    raise RuntimeError(f"❌ SHA-256 архива не совпал с manifest.json!\\n  ожидание: {art['sha256_tar']}\\n  факт:     {actual_sha}")
+print("✅ SHA-256 подтверждён.")
+
+server_bin = next(LOCAL_BIN_DIR.rglob("llama-server"), None)
+if server_bin is None:
+    print("📥 Распаковка архива...")
+    r = subprocess.run(f"tar -xzf '{archive}' -C '{LOCAL_BIN_DIR}'",
+                       shell=True, capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        raise RuntimeError(f"❌ Ошибка распаковки: {r.stderr[-800:]}")
+    server_bin = next(LOCAL_BIN_DIR.rglob("llama-server"), None)
+assert server_bin is not None, "❌ llama-server не найден в архиве."
+server_bin.chmod(0o755)
+
+env = dict(os.environ)
+env["LD_LIBRARY_PATH"] = f"{server_bin.parent}:{env.get('LD_LIBRARY_PATH', '')}"
+r = subprocess.run([str(server_bin), "--version"], capture_output=True, text=True,
+                   env=env, timeout=30)
+print(f"✅ llama-server: {(r.stdout or r.stderr).strip().splitlines()[0]}")
+
+ldd = subprocess.run(["ldd", str(server_bin)], capture_output=True, text=True,
+                     env=env).stdout
+missing = [l.strip() for l in ldd.splitlines() if "not found" in l]
+if missing:
+    raise RuntimeError(f"❌ Недостающие библиотеки: {missing}")
+
+LLAMA_SERVER_BIN = str(server_bin)
+LLAMA_BUILD_INFO = {"sha256_tar": actual_sha, "commit": manifest["коммит"],
+                    "branch": manifest["ветка"], "cuda": manifest["cuda_архитектуры"]["gpu_all"]}
+print(f"✅ Блок 5 завершён: {LLAMA_SERVER_BIN}")
+"""
+
 
 def md_cell(src: str) -> dict:
     return {"cell_type": "markdown", "id": "%08x" % random.getrandbits(32),
@@ -269,6 +324,7 @@ CELLS = [
     code_cell(BLOCK_02),
     code_cell(BLOCK_03),
     code_cell(BLOCK_04),
+    code_cell(BLOCK_05),
 ]
 
 
