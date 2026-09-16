@@ -26,7 +26,7 @@ Google Drive возобновляет автоматом.
 6 функции · 7 цикл · 8 агрегация · 9 финал · 10 пересборка из логов.
 """
 
-EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2", "БЛОК 3"]
+EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2", "БЛОК 3", "БЛОК 4"]
 
 
 BLOCK_00 = """\
@@ -182,6 +182,74 @@ print(f"📂 Результаты: {SAVE_DIR}")
 print("=" * 70)
 """
 
+BLOCK_04 = """\
+# @title БЛОК 4: УСТАНОВКА MERA (форк lm-evaluation-harness)
+import sys, importlib, importlib.metadata, subprocess
+
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+os.environ.setdefault("HF_DATASETS_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
+
+# 1. Pin transformers<5.00: в 5.x нет AutoModelForVision2Seq, ломается import lm_eval
+print("🔧 Фиксация transformers>=4.44,<5.00 (совместимость с форком MERA)...")
+r = subprocess.run('pip install "transformers>=4.44,<5.00" accelerate -q',
+                   shell=True, capture_output=True, text=True)
+if r.returncode != 0:
+    raise RuntimeError(f"❌ Не удалось установить transformers 4.x: {r.stderr[-800:]}")
+
+# 2. Клонирование MERA с подмодулями
+if not MERA_REPO_DIR.exists():
+    print("📥 Клонирование MERA (с подмодулями)...")
+    r = subprocess.run("git clone --recurse-submodules https://github.com/MERA-Evaluation/MERA.git",
+                       shell=True, capture_output=True, text=True, timeout=600)
+    if r.returncode != 0:
+        raise RuntimeError(f"❌ Ошибка клонирования MERA: {r.stderr[-800:]}")
+else:
+    print("ℹ️ MERA уже склонирован. Обновление подмодулей...")
+    subprocess.run("cd MERA && git pull --all --rebase --recurse-submodules",
+                   shell=True, capture_output=True, text=True)
+if not LM_EVAL_PATH.exists():
+    raise RuntimeError(f"❌ {LM_EVAL_PATH} не существует — проверьте подмодули MERA.")
+
+# 3. Патч бага логирования в lm-eval (маскирует реальные ошибки) — безусловно
+api_models = LM_EVAL_PATH / "lm_eval" / "models" / "api_models.py"
+content = api_models.read_text(encoding="utf-8")
+patched = content.replace(
+    'eval_logger.error(f"Exception:{repr(e)}, {outputs}, retrying.")',
+    'eval_logger.error(f"Exception:{repr(e)}, retrying.")')
+if patched != content:
+    api_models.write_text(patched, encoding="utf-8")
+    print("✅ Патч api_models.py применён (UnboundLocalError больше не маскирует сбои).")
+
+# 4. Установка форка без перезаписи зависимостей
+print("📦 Установка lm-evaluation-harness из форка MERA...")
+r = subprocess.run(f"pip install -e {LM_EVAL_PATH} -q", shell=True,
+                   capture_output=True, text=True)
+if r.returncode != 0:
+    print(f"⚠️ pip install -e вернул код {r.returncode}: {r.stderr[-500:]}")
+
+# 5. Минимальные зависимости
+MINIMAL_DEPS = ["huggingface_hub", "datasets", "openai", "tiktoken", "pandas",
+                "tqdm", "nest_asyncio", "sqlitedict", "dill", "sacrebleu", "rouge_score"]
+subprocess.run(f"pip install {' '.join(MINIMAL_DEPS)} -q", shell=True, capture_output=True)
+
+# 6. Импорт из форка + проверка критичного класса
+sys.path.insert(0, str(LM_EVAL_PATH))
+for mod in [m for m in list(sys.modules) if m.startswith("lm_eval")]:
+    del sys.modules[mod]
+import lm_eval
+import transformers
+from transformers import AutoModelForVision2Seq  # критичная проверка пина
+r = subprocess.run("lm_eval --help", shell=True, capture_output=True, text=True, timeout=30)
+assert r.returncode == 0, "❌ CLI lm_eval не отвечает"
+
+TRANSFORMERS_VERSION = importlib.metadata.version("transformers")
+LM_EVAL_VERSION = importlib.metadata.version("lm_eval")
+print(f"✅ Блок 4 завершён: lm_eval {LM_EVAL_VERSION} из {lm_eval.__file__}")
+print(f"   transformers {TRANSFORMERS_VERSION}, AutoModelForVision2Seq доступен.")
+"""
+
 
 def md_cell(src: str) -> dict:
     return {"cell_type": "markdown", "id": "%08x" % random.getrandbits(32),
@@ -200,6 +268,7 @@ CELLS = [
     code_cell(BLOCK_01),
     code_cell(BLOCK_02),
     code_cell(BLOCK_03),
+    code_cell(BLOCK_04),
 ]
 
 
