@@ -8,6 +8,8 @@ import json
 import random
 from pathlib import Path
 
+random.seed(20260916)
+
 ROOT = Path(__file__).resolve().parent.parent
 NB_PATH = ROOT / "mera_quant_bench.ipynb"
 
@@ -657,6 +659,5 @@ def verify() -> None:
 
 
 if __name__ == "__main__":
-    random.seed(20260916)
     build()
     verify()
