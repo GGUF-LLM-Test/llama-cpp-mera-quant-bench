@@ -28,7 +28,7 @@ Google Drive возобновляет автоматом.
 6 функции · 7 цикл · 8 агрегация · 9 финал · 10 пересборка из логов.
 """
 
-EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2", "БЛОК 3", "БЛОК 4", "БЛОК 5", "БЛОК 6", "БЛОК 7", "БЛОК 8"]
+EXPECTED_BLOCKS = ["БЛОК 0", "БЛОК 1", "БЛОК 2", "БЛОК 3", "БЛОК 4", "БЛОК 5", "БЛОК 6", "БЛОК 7", "БЛОК 8", "БЛОК 9", "БЛОК 10"]
 
 
 BLOCK_00 = """\
@@ -798,6 +798,71 @@ print(f"\\n💾 Сохранено в {SAVE_DIR}: mera_results.csv, degradation.
       f"degradation_heatmap.png, mera_quant_report.md")
 '''
 
+BLOCK_09 = """\
+# @title БЛОК 9: ФИНАЛЬНЫЙ РЕЙТИНГ (вердикты + Pareto)
+def verdict(delta_pct):
+    if delta_pct is None or (isinstance(delta_pct, float) and np.isnan(delta_pct)):
+        return "нет данных"
+    deg = -delta_pct
+    if deg <= 1:  return "≈ без потерь"
+    if deg <= 3:  return "рекомендуется"
+    if deg <= 7:  return "приемлемо"
+    return "⚠️ заметная деградация"
+
+df["Verdict"] = df["Delta_pct"].apply(verdict)
+df.loc[df["Is_Ref"], "Verdict"] = "🏆 ЭТАЛОН"
+rank_cols = ["Quant", "Size_GB", "AvgScore", "Delta_pp", "Delta_pct", "Verdict"]
+display(df[rank_cols].round(4))
+df[rank_cols].round(4).to_csv(SAVE_DIR / "final_ranking.csv", index=False, encoding="utf-8")
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+sub = df.dropna(subset=["AvgScore"])
+ax1.plot(sub["Size_GB"], sub["AvgScore"], "o-")
+for _, r in sub.iterrows():
+    ax1.annotate(r["Quant"], (r["Size_GB"], r["AvgScore"]), fontsize=8,
+                 xytext=(0, 6), textcoords="offset points", ha="center")
+ax1.set_xlabel("Размер, ГБ"); ax1.set_ylabel("Средний балл MERA")
+ax1.set_title(f"Средний балл vs размер · {BASE_MODEL_NAME}", fontweight="bold")
+
+pts = sub[~sub["Is_Ref"]].sort_values("AvgScore", ascending=False)
+front, best = [], np.inf
+for _, r in pts.iterrows():
+    if r["Size_GB"] < best:
+        front.append(r["Quant"]); best = r["Size_GB"]
+ax2.scatter(pts["Size_GB"], pts["AvgScore"], s=40, color="lightgray", label="Все кванты")
+fp = pts[pts["Quant"].isin(front)]
+ax2.scatter(fp["Size_GB"], fp["AvgScore"], s=80, color="tab:blue", label="Pareto-фронт")
+for _, r in fp.iterrows():
+    ax2.annotate(r["Quant"], (r["Size_GB"], r["AvgScore"]), fontsize=8,
+                 xytext=(4, 4), textcoords="offset points")
+ax2.set_xlabel("Размер, ГБ"); ax2.set_ylabel("Средний балл")
+ax2.set_title("Pareto: меньше ГБ при том же качестве", fontweight="bold")
+ax2.legend(fontsize=8)
+fig.tight_layout()
+fig.savefig(SAVE_DIR / "final_analysis.png", dpi=200, bbox_inches="tight")
+plt.show()
+print(f"💾 Итоговый рейтинг: {SAVE_DIR / 'final_ranking.csv'}")
+"""
+
+BLOCK_10 = """\
+# @title БЛОК 10: ПЕРЕСБОРКА ИЗ СЫРЫХ ЛОГОВ (без GPU и без моделей)
+rows = []
+for quant_dir in sorted(p for p in RAW_LOGS_DIR.iterdir() if p.is_dir()):
+    row = {"Quant": quant_dir.name}
+    for task_dir in sorted(p for p in quant_dir.iterdir() if p.is_dir()):
+        if task_dir.name not in TASK_INFO:
+            continue
+        parsed = parse_task_metrics(quant_dir.name, task_dir.name)
+        if parsed:
+            row[task_dir.name] = parsed["primary"]
+            row[f"{task_dir.name}_wall_s"] = parsed.get("wall_s")
+    rows.append(row)
+df_re = pd.DataFrame(rows)
+display(df_re)
+df_re.to_csv(SAVE_DIR / "reparsed_from_raw.csv", index=False, encoding="utf-8")
+print(f"💾 {SAVE_DIR / 'reparsed_from_raw.csv'}")
+"""
+
 
 def md_cell(src: str) -> dict:
     return {"cell_type": "markdown", "id": "%08x" % random.getrandbits(32),
@@ -821,6 +886,8 @@ CELLS = [
     code_cell(BLOCK_06),
     code_cell(BLOCK_07),
     code_cell(BLOCK_08),
+    code_cell(BLOCK_09),
+    code_cell(BLOCK_10),
 ]
 
 
