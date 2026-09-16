@@ -670,7 +670,7 @@ def get_tokenizer_path(repo_id):
                     config[key] = float(config[key])
                     changed = True
             if changed:
-                cfg.write_text(json.dump(config, indent=2), encoding="utf-8")
+                cfg.write_text(json.dumps(config, indent=2), encoding="utf-8")
         except Exception as e:
             print(f"  ⚠️ Патч config.json не удался: {e}")
     drive_dir.mkdir(parents=True, exist_ok=True)
@@ -681,7 +681,7 @@ def get_tokenizer_path(repo_id):
 '''
 ```
 
-Внимание: в функции выше опечатка быть не может — `cfg.write_text(json.dumps(config, indent=2), encoding="utf-8")` (не `json.dump`). Ниже — продолжение той же ячейки (в `tools/build_notebook.py` это одна строковая константа `BLOCK_06`, части 6.4–6.6 дописываются в неё):
+Ниже — продолжение той же ячейки (в `tools/build_notebook.py` это одна строковая константа `BLOCK_06`: части 6.1–6.3 и 6.4–6.6 объединяются, вторая дописывается в первую):
 
 ```python
 BLOCK_06 += '''\
