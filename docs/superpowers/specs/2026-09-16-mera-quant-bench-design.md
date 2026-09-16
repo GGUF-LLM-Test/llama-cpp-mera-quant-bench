@@ -122,8 +122,11 @@ PRESETS = {
 - **Блок 4. Установка MERA** — `git clone --recurse-submodules
   https://github.com/MERA-Evaluation/MERA.git`, установка форка по официальной инструкции:
   `pip install -e "./MERA/lm-evaluation-harness[api]"` (extra `api` — для бэкенда
-  local-completions). Проверка `lm_eval --help`. Фиксация фактических версий `transformers`
-  и `lm_eval` (в `config_meta` чекпоинта и в шапке отчётов).
+  local-completions); clone/pip — `!`-магия Colab (живой вывод, идиоматично).
+  Установка проверяется через `importlib.metadata` (версии; `PackageNotFoundError`
+  при сбое) — импорт в ядро не нужен: lm_eval вызывается только CLI-подпроцессами
+  (editable-установка PEP 660 невидима работающему ядру). Фиксация фактических версий
+  `transformers` и `lm_eval` (в `config_meta` чекпоинта и в шапке отчётов).
   *(Поправка 2026-09-16, после upstream-коммита
   [8698451](https://github.com/MERA-Evaluation/MERA/commit/8698451dd7c281462c684190c9e38d2fae0f6d7a):
   пин `transformers<5.00`, патч `api_models.py`, sys.path-манипуляции и отдельный список
@@ -297,6 +300,16 @@ huggingface_hub — предустановлены в Colab; `openai` не ну�
 requests/aiohttp; `nest_asyncio` не нужен — lm_eval выполняется в subprocess).
 Следствие: форк пинит `numpy<1.27` → pip откатит numpy Colab до 1.26.x (протестировано
 мейнтейнерами). Фиксация версий в `config_meta` сохранена.
+
+**Урок 2026-09-16 (багрепорт из Colab):** удалённый при чистке `sys.path.insert` был
+рабочим механизмом, а не перестраховкой — editable-установка (PEP 660: `.pth`/finder
+в site-packages) подхватывается только процессами, запущенными после `pip install`,
+поэтому `import lm_eval` в уже работающем ядре падал с `ModuleNotFoundError`. Решение —
+не возвращать хак, а убрать in-kernel импорт вовсе: единственный потребитель lm_eval —
+CLI-подпроцессы (`run_task`), которым установка видна; проверка установки — через
+`importlib.metadata` (+ `importlib.invalidate_caches()`). Простые операции (clone, pip)
+переведены на `!`-магию Colab; subprocess остаётся только для гейтов по коду возврата
+(Блоки 5–6).
 
 ### 10.2. Прочие ограничения
 

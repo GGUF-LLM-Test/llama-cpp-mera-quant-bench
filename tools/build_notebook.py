@@ -6,6 +6,7 @@
 import ast
 import json
 import random
+import re
 from pathlib import Path
 
 random.seed(20260916)
@@ -187,50 +188,38 @@ print("=" * 70)
 
 BLOCK_04 = """\
 # @title БЛОК 4: УСТАНОВКА MERA (форк lm-evaluation-harness)
-import importlib.metadata, subprocess
+import importlib, importlib.metadata
 
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
 os.environ.setdefault("HF_DATASETS_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
 
-# 1. Клонирование MERA с подмодулями
-# Сабмодуль: artemorloff/lm-evaluation-harness @ feat/text_benches (lm-eval 0.4.13.dev0).
-# Форк совместим с предустановленным в Colab transformers 5.x из коробки
-# (AutoModelForVision2Seq предоставляется через lm_eval.models.transformers_compat),
-# баг логирования api_models.py исправлен upstream — пины и патчи не нужны.
+# 1. Клонирование MERA с подмодулями.
+# Сабмодуль: artemorloff/lm-evaluation-harness @ feat/text_benches (lm-eval 0.4.13.dev0) —
+# совместим с transformers 5.x из коробки, патчи и пины не нужны (подробнее — в README).
 if not MERA_REPO_DIR.exists():
     print("📥 Клонирование MERA (с подмодулями)...")
-    r = subprocess.run("git clone --recurse-submodules https://github.com/MERA-Evaluation/MERA.git",
-                       shell=True, capture_output=True, text=True, timeout=600)
-    if r.returncode != 0:
-        raise RuntimeError(f"❌ Ошибка клонирования MERA: {r.stderr[-800:]}")
+    !git clone --recurse-submodules https://github.com/MERA-Evaluation/MERA.git
 else:
     print("ℹ️ MERA уже склонирован. Обновление подмодулей...")
-    subprocess.run("cd MERA && git pull --all --rebase --recurse-submodules",
-                   shell=True, capture_output=True, text=True)
-if not LM_EVAL_PATH.exists():
-    raise RuntimeError(f"❌ {LM_EVAL_PATH} не существует — проверьте подмодули MERA.")
+    !cd MERA && git pull --all --rebase --recurse-submodules
+assert LM_EVAL_PATH.exists(), f"❌ {LM_EVAL_PATH} не существует — проверьте подмодули MERA."
 
-# 2. Установка форка по официальной инструкции + extra [api] для бэкенда local-completions
-# (базовые зависимости форка уже включают datasets/sqlitedict/dill/sacrebleu/rouge-score;
-#  extra [api] добавляет requests/aiohttp/tenacity/tqdm/tiktoken;
-#  transformers/torch/pandas/matplotlib/huggingface_hub — предустановлены в Colab)
-print("📦 Установка lm-evaluation-harness (feat/text_benches) с extra [api]...")
-r = subprocess.run(f'pip install -e "{LM_EVAL_PATH}[api]" -q', shell=True,
-                   capture_output=True, text=True)
-if r.returncode != 0:
-    raise RuntimeError(f"❌ Ошибка установки lm-eval: {r.stderr[-800:]}")
+# 2. Установка форка по официальной инструкции + extra [api] для бэкенда local-completions.
+# База форка уже включает datasets/sqlitedict/dill/sacrebleu/rouge-score; extra [api]
+# добавляет requests/aiohttp/tenacity/tqdm/tiktoken; transformers/torch/pandas/
+# matplotlib/huggingface_hub предустановлены в Colab — отдельные списки зависимостей не нужны.
+!pip install -e "{LM_EVAL_PATH}[api]"
 
-# 3. Проверка импорта и CLI
-import lm_eval
-r = subprocess.run("lm_eval --help", shell=True, capture_output=True, text=True, timeout=30)
-assert r.returncode == 0, "❌ CLI lm_eval не отвечает"
-
-TRANSFORMERS_VERSION = importlib.metadata.version("transformers")
+# 3. Проверка установки. ВАЖНО: lm_eval в этом ноутбуке вызывается ТОЛЬКО через CLI
+#    (subprocess в Блоке 6) — импорта в ядре не требуется: editable-установка (PEP 660)
+#    видна только процессам, запущенным ПОСЛЕ pip install. Если установка не удалась,
+#    следующая строка поднимет PackageNotFoundError.
+importlib.invalidate_caches()
 LM_EVAL_VERSION = importlib.metadata.version("lm_eval")
-print(f"✅ Блок 4 завершён: lm_eval {LM_EVAL_VERSION} из {lm_eval.__file__}")
-print(f"   transformers {TRANSFORMERS_VERSION} (предустановленный в Colab — пин не нужен).")
+TRANSFORMERS_VERSION = importlib.metadata.version("transformers")
+print(f"✅ Блок 4 завершён: lm_eval {LM_EVAL_VERSION}, transformers {TRANSFORMERS_VERSION}.")
 """
 
 BLOCK_05 = """\
@@ -902,7 +891,15 @@ def verify() -> None:
     code_cells = [c for c in nb["cells"] if c["cell_type"] == "code"]
     for i, c in enumerate(code_cells):
         src = "".join(c["source"])
-        ast.parse(src)  # SyntaxError → падение с номером ячейки
+        try:
+            ast.parse(src)
+        except SyntaxError:
+            # IPython-магия (!cmd / %cmd) — не валидный Python: подменяем строки
+            # магии на pass (с сохранением отступа) и парсим повторно.
+            patched = re.sub(r"^([ \t]*)[!%](.+)$",
+                             lambda m: f"{m.group(1)}pass  # magic: {m.group(2)}",
+                             src, flags=re.MULTILINE)
+            ast.parse(patched)  # SyntaxError → падение с номером ячейки
     titles = ["".join(c["source"]).splitlines()[0] for c in code_cells]
     for marker in EXPECTED_BLOCKS:
         assert any(marker + ":" in t for t in titles), f"Не найден блок: {marker}"
