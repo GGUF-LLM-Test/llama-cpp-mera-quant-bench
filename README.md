@@ -92,3 +92,11 @@ MERA держит ответы тестов закрытыми для больш
 отчёты); сборка llama.cpp — `llama-cpp-colab-builder`. Ноутбук генерируется из
 `tools/build_notebook.py` (единственный источник правды): правки — там, затем
 `python tools/build_notebook.py`.
+
+Ветка `GGUF-LLM-Test/llama.cpp@v0.4.1-pr27537-version` дополнительно несёт фикс
+[454e945](https://github.com/GGUF-LLM-Test/llama.cpp/commit/454e945): ленивое
+повышение `n_outputs_max` до `n_batch` при первом echo+logprobs-запросе (без
+ключей и без стартовой VRAM). Без него параллельные echo-задачи в одном
+decode-батче переполняли буфер выходов и убивали сервер
+(`GGML_ASSERT(n_outputs_max <= cparams.n_outputs_max)`); с ним —
+echo-промпты идут полными батчами и краш невозможен при любой конкуренции.
